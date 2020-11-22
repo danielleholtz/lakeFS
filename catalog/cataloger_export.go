@@ -8,8 +8,10 @@ import (
 	"strings"
 
 	"github.com/georgysavva/scany/pgxscan"
+	"github.com/jackc/pgconn"
 	"github.com/lib/pq"
 	"github.com/treeverse/lakefs/db"
+	"github.com/treeverse/lakefs/logging"
 )
 
 // ExportConfiguration describes the export configuration of a branch, as passed on wire, used
@@ -166,57 +168,71 @@ func (c *cataloger) GetExportState(repo string, branch string) (ExportState, err
 }
 
 func (c *cataloger) ExportStateSet(repo, branch string, cb ExportStateCallback) error {
-	_, err := c.db.Transact(func(tx db.Tx) (interface{}, error) {
+	_, err := c.db.Transact(db.Void(func(tx db.Tx) error {
 		var res struct {
 			CurrentRef   string
-			State        CatalogBranchExportStatus
+			Status       CatalogBranchExportStatus
 			ErrorMessage *string
 		}
 
 		branchID, err := c.getBranchIDCache(tx, repo, branch)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		// get current state
 		err = tx.Get(&res, `
-		SELECT current_ref, state, error_message
-		FROM catalog_branches_export_state
-		WHERE branch_id=$1 FOR UPDATE`,
+			SELECT current_ref, state, error_message
+			FROM catalog_branches_export_state
+			WHERE branch_id=$1 FOR NO KEY UPDATE`,
 			branchID)
 		missing := errors.Is(err, db.ErrNotFound)
 		if err != nil && !missing {
-			err = fmt.Errorf("ExportStateSet: failed to get existing state: %w", err)
-			return nil, err
+			return fmt.Errorf("ExportStateMarkStart: failed to get existing state: %w", err)
 		}
 		oldRef := res.CurrentRef
-		state := res.State
+		oldStatus := res.Status
+
+		l := logging.Default().WithFields(logging.Fields{
+			"old_ref":    oldRef,
+			"old_status": oldStatus,
+			"repo":       repo,
+			"branch":     branch,
+			"branch_id":  branchID,
+		})
 
 		// run callback
-		newRef, newState, newMsg, err := cb(oldRef, state)
+		newRef, newStatus, newMessage, err := cb(oldRef, oldStatus)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		// update new state
-		var query string
-		if missing {
-			query = `
-			INSERT INTO catalog_branches_export_state (branch_id, current_ref, state, error_message)
-			VALUES ($1, $2, $3, $4)`
-		} else {
-			query = `
-			UPDATE catalog_branches_export_state
-			SET current_ref=$2, state=$3, error_message=$4
-			WHERE branch_id=$1`
-		}
+		l = l.WithFields(logging.Fields{
+			"new_ref":    newRef,
+			"new_status": newStatus,
+		})
 
-		tag, err := tx.Exec(query, branchID, newRef, newState, newMsg)
+		// update new state
+		var tag pgconn.CommandTag
+		if missing {
+			l.Info("insert on DB")
+			tag, err = tx.Exec(`
+				INSERT INTO catalog_branches_export_state (branch_id, current_ref, state, error_message)
+				VALUES ($1, $2, 'in-progress', $3)`,
+				branchID, newRef, newMessage)
+		} else {
+			l.Info("update on DB")
+			tag, err = tx.Exec(`
+				UPDATE catalog_branches_export_state
+				SET current_ref=$2, state='in-progress', error_message=NULL
+				WHERE branch_id=$1`,
+				branchID, newRef)
+		}
 		if err != nil {
-			return nil, fmt.Errorf("ExportStateSet: update state: %w", err)
+			return err
 		}
 		if tag.RowsAffected() != 1 {
-			return nil, fmt.Errorf("ExportStateSet: could not update single row %s: %w", tag, ErrExportFailed)
+			return fmt.Errorf("[I] ExportMarkSet: could not update single row %s: %w", tag, ErrEntryNotFound)
 		}
-		return nil, err
-	})
+		return err
+	}))
 	return err
 }
