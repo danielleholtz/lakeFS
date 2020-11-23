@@ -5,9 +5,9 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/jackc/pgx/v4"
 	nanoid "github.com/matoous/go-nanoid"
 
+	"github.com/treeverse/lakefs/db"
 	"github.com/treeverse/lakefs/logging"
 	"github.com/treeverse/lakefs/parade"
 
@@ -26,7 +26,7 @@ var ErrExportInProgress = errors.New("export currently in progress")
 
 // ExportBranchStart inserts a start task on branch, sets branch export state to pending.
 // It returns ErrExportInProgress if an export is already in progress.
-func ExportBranchStart(parade parade.Parade, cataloger catalog.Cataloger, repo, branch string) (string, error) {
+func ExportBranchStart(parade parade.Parade, cataloger catalog.Exporter, repo, branch string) (string, error) {
 	commit, err := cataloger.GetCommit(context.Background(), repo, branch)
 	if err != nil {
 		return "", err
@@ -78,7 +78,7 @@ var (
 )
 
 // ExportBranchDone ends the export branch process by changing the status
-func ExportBranchDone(parade parade.Parade, cataloger catalog.Cataloger, status catalog.CatalogBranchExportStatus, statusMsg *string, repo, branch, commitRef string) error {
+func ExportBranchDone(parade parade.Parade, cataloger catalog.Exporter, status catalog.CatalogBranchExportStatus, statusMsg *string, repo, branch, commitRef string) error {
 	l := logging.Default().WithFields(logging.Fields{"repo": repo, "branch": branch, "commit_ref": commitRef, "status": status, "status_message": statusMsg})
 	if status == catalog.ExportStatusSuccess {
 		// Start the next export if continuous.
@@ -129,9 +129,9 @@ func ExportBranchRepair(cataloger catalog.Cataloger, repo, branch string) error 
 	})
 }
 
-func hasContinuousExport(c catalog.Cataloger, repo, branch string) (bool, error) {
+func hasContinuousExport(c catalog.ExportConfigurator, repo, branch string) (bool, error) {
 	exportConfiguration, err := c.GetExportConfigurationForBranch(repo, branch)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, db.ErrNotFound) {
 		return false, nil
 	}
 	if err != nil {

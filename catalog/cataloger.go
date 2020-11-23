@@ -162,6 +162,12 @@ type Hookser interface {
 	Hooks() *CatalogerHooks
 }
 
+type Exporter interface {
+	Committer
+	ExportConfigurator
+	ExportStateHandler
+}
+
 type ExportConfigurator interface {
 	GetExportConfigurationForBranch(repository string, branch string) (ExportConfiguration, error)
 	GetExportConfigurations() ([]ExportConfigurationForBranch, error)
